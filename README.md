@@ -1,8 +1,9 @@
 ## SIMPLE MATRIX OPERATIONS LIBRARY FOR C lang
 
-	simple linaer algebra operations library for c which is using GPU and CPU for creating simple datascience things in c 
+	simple linear algebra operations library for c which is using GPU and CPU for creating simple datascience things in c 
 	
 ### deppendincies 
+
 	only one system wise if u want support for CUDA u need to install it 
 
 ### DOC
@@ -10,7 +11,7 @@
 
 
 ### QUICK START
-jsut for begining u need the header file and 
+just for begining u need the header file and 
 specify implementation define
 ```
 #define SIMPLE_MATRIX_OPERATIONS_IMPLEMENTATION
