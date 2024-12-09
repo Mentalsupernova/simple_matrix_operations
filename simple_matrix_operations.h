@@ -7,14 +7,10 @@
 #include "string.h"
 #include "math.h"
 
-/*for CPU style multiplication*/
 #define BLOCK_SIZE 128
 #define NUM_THREADS 16
 
 
-/*for GPU style multiplication*/
-#define SHIT_TILE_SIZE (16)
-/* CHANGE THIS FOR UR MACHINE */
 #define NVIDIA_DOT_PPTX_KERNEL_FPATH "/home/utsu/projects/c/image_processing/libs/cuda_kernels/nvidia_gpu_dot.ptx"
 
 typedef enum {
@@ -62,9 +58,10 @@ typedef struct {
 
 
 
-extern simple_matrix *filter_rows(simple_matrix *matrix, int (*condition)(double *row, size_t cols));
-extern simple_matrix *extract_columns(simple_matrix *matrix, size_t *columns, size_t num_columns);
-extern simple_matrix *allocate_matrix(size_t ndims, size_t *dims, uint8_t initialization_method, double random_min, double random_max);
+
+
+extern double sum_matrix(simple_matrix *matrix);
+extern void print_shape(simple_matrix * mat);
 extern void add_cpu(simple_matrix * matrix_a,simple_matrix * matrix_b,simple_matrix * output);
 extern void substruct_cpu(simple_matrix * matrix_a,simple_matrix * matrix_b,simple_matrix * output);
 extern void transpose(simple_matrix * matrix);
@@ -80,16 +77,33 @@ extern void add_scalar_to_column(simple_matrix *matrix, size_t col_index, double
 extern double sum_column(simple_matrix *matrix, size_t col_index);
 extern void normalize_columns(simple_matrix *matrix);
 extern void apply_function_to_matrix(simple_matrix *matrix, double (*func)(double));
-extern simple_matrix *extract_column(simple_matrix *matrix, size_t col_index);
 extern void replace_column(simple_matrix *matrix, size_t col_index, simple_matrix *new_column);
 extern void add_columns(simple_matrix *matrix, simple_matrix *new_columns);
-extern simple_matrix *slice_rows(simple_matrix *matrix, int start, int end);
-extern void print_shape(simple_matrix * mat);
 extern void matrix_to_csv(simple_matrix *mat, const char *filename);
-extern simple_matrix *matrix_from_csv(const char *filename);
-extern simple_matrix *extract_row(simple_matrix *matrix, size_t row_index);
 extern  size_t calculate_index(size_t ndims, size_t *dims, size_t *indices);
 extern int reshape(simple_matrix *matrix, size_t new_ndims, size_t *new_dims);
+
+
+
+extern simple_matrix extract_columns(simple_matrix *matrix, size_t *columns, size_t num_columns);
+extern simple_matrix extract_column(simple_matrix *matrix, size_t col_index);
+extern simple_matrix matrix_from_csv(const char *filename);
+extern simple_matrix slice_rows(simple_matrix *matrix, int start, int end);
+extern simple_matrix extract_row(simple_matrix *matrix, size_t row_index);
+extern simple_matrix copy_matrix(const simple_matrix *source);
+extern simple_matrix filter_rows(simple_matrix *matrix, int (*condition)(double *row, size_t cols));
+extern simple_matrix allocate_matrix(size_t ndims, size_t *dims, uint8_t initialization_method, double random_min, double random_max);
+
+void elementwise_multiply(simple_matrix *matrix_a, simple_matrix *matrix_b, simple_matrix *output);
+#define MATRIX_TOTAL_ELEMENTS(mat) \
+    ({ \
+        size_t total_elements = 1; \
+        for (size_t i = 0; i < (mat)->ndims; i++) { \
+            total_elements *= (mat)->dims[i]; \
+        } \
+        total_elements; \
+    })
+
 
 #ifdef NVIDIA_GPU_DEVICE
 
@@ -99,10 +113,18 @@ extern int reshape(simple_matrix *matrix, size_t new_ndims, size_t *new_dims);
 void dot_parallel_gpu_nvidia(double *a, double *b, double *c, size_t rows_a, size_t cols_a, size_t cols_b);
 void gpu_matrix_add(double *a, double *b, double *c, size_t rows, size_t cols);
 void gpu_matrix_sub(double *a, double *b, double *c, size_t rows, size_t cols);
-#define dot(mat_a, mat_b, output) (dot_parallel_gpu_nvidia(mat_a->mat, mat_b->mat, output->mat, mat_a->dims[0], mat_a->dims[1], mat_b->dims[1]))
+void elementwise_multiply_gpu(const double *a, const double *b, double *c, size_t total_elements);
+
+#define dot(mat_a, mat_b, output) (dot_parallel_gpu_nvidia((mat_a)->mat, (mat_b)->mat, (output)->mat, (mat_a)->dims[0], (mat_a)->dims[1], (mat_b)->dims[1]))
 #define add(mat_a, mat_b, output) (gpu_matrix_add(mat_a->mat, mat_b->mat, output->mat, mat_a->dims[0],mat_a->dims[1]))
 #define substruct(mat_a, mat_b, output) (gpu_matrix_sub(mat_a->mat, mat_b->mat, output->mat, mat_a->dims[0],mat_a->dims[1]))
+#define elementwise_mul(mat_a, mat_b, output) \
+    (elementwise_multiply_gpu((mat_a)->mat, (mat_b)->mat, (output)->mat, MATRIX_TOTAL_ELEMENTS(mat_a)))
+
 #else
+
+
+#define elementwise_mul(mat_a, mat_b, output) (elementwise_multiply(mat_a, mat_b, output))
 #define dot(mat_a,mat_b,output) (dot_parallel(mat_a,mat_b,output))
 #define add(mat_a,mat_b,output) (add_cpu(mat_a,mat_b,output))
 #define substruct(mat_a,mat_b,output) (substruct_cpu(mat_a,mat_b,output))
@@ -128,6 +150,46 @@ void gpu_matrix_sub(double *a, double *b, double *c, size_t rows, size_t cols);
  * SMO IMPLEMENTATION
  */
 #ifdef SIMPLE_MATRIX_OPERATIONS_IMPLEMETATION
+double sum_matrix(simple_matrix *matrix) {
+    if (matrix == NULL || matrix->mat == NULL) {
+        printf("Error: Invalid matrix.\n");
+        return 0.0;
+    }
+
+    double sum = 0.0;
+    size_t total_elements = 1;
+    for (size_t i = 0; i < matrix->ndims; i++) {
+        total_elements *= matrix->dims[i];
+    }
+
+    for (size_t i = 0; i < total_elements; i++) {
+        sum += matrix->mat[i];
+    }
+
+    return sum;
+}
+
+void elementwise_multiply(simple_matrix *matrix_a, simple_matrix *matrix_b, simple_matrix *output) {
+    if (matrix_a == NULL || matrix_b == NULL || output == NULL ||
+        matrix_a->mat == NULL || matrix_b->mat == NULL || output->mat == NULL) {
+        printf("Error: Invalid input matrices.\n");
+        return;
+    }
+
+    size_t total_elements = 1;
+    for (size_t i = 0; i < matrix_a->ndims; i++) {
+        if (matrix_a->dims[i] != matrix_b->dims[i] || matrix_a->dims[i] != output->dims[i]) {
+            printf("Error: Matrices must have the same shape for element-wise multiplication.\n");
+            return;
+        }
+        total_elements *= matrix_a->dims[i];
+    }
+
+    for (size_t i = 0; i < total_elements; i++) {
+        output->mat[i] = matrix_a->mat[i] * matrix_b->mat[i];
+    }
+}
+
 
 
 #ifdef NVIDIA_GPU_DEVICE
@@ -171,46 +233,28 @@ size_t calculate_index(size_t ndims, size_t *dims, size_t *indices) {
 
     return index;
 }
-simple_matrix *extract_row(simple_matrix *matrix, size_t row_index) {
-    if (matrix == NULL || matrix->mat == NULL || row_index >= MATRIX_ROWS(matrix)) {
-        printf("Error: Invalid row index or matrix.\n");
-        return NULL;
-    }
+simple_matrix extract_row(simple_matrix *matrix, size_t row_index) {
 
-    // Allocate a new matrix to hold the extracted row
-    simple_matrix *row = allocate_matrix(2, (size_t[]){1, MATRIX_COLS(matrix)}, ZEROS, 0.0, 0.0);
-    if (!row) {
-        printf("Error: Unable to allocate memory for the row.\n");
-        return NULL;
-    }
+    simple_matrix row = allocate_matrix(2, (size_t[]){1, MATRIX_COLS(matrix)}, ZEROS, 0.0, 0.0);
 
-    // Copy the row data
     for (size_t j = 0; j < MATRIX_COLS(matrix); j++) {
-        row->mat[j] = matrix->mat[row_index * MATRIX_COLS(matrix) + j];
+        row.mat[j] = matrix->mat[row_index * MATRIX_COLS(matrix) + j];
     }
 
     return row;
 }
 
 
-simple_matrix *matrix_from_csv(const char *filename) {
-    if (filename == NULL) {
-        printf("Error: Invalid filename.\n");
-        return NULL;
-    }
+simple_matrix matrix_from_csv(const char *filename) {
 
     FILE *file = fopen(filename, "r");
-    if (file == NULL) {
-        printf("Error: Unable to open file for reading: %s\n", filename);
-        return NULL;
-    }
 
     size_t rows = 0, cols = 0;
     char line[1024];
 
     while (fgets(line, sizeof(line), file)) {
         rows++;
-        if (cols == 0) { 
+        if (cols == 0) { // Assume the first line contains the number of columns
             char *token = strtok(line, ",");
             while (token != NULL) {
                 cols++;
@@ -221,19 +265,14 @@ simple_matrix *matrix_from_csv(const char *filename) {
 
     rewind(file);
 
-    simple_matrix *mat = allocate_matrix(2, (size_t[]){rows, cols}, ZEROS, 0.0, 0.0);
-    if (mat == NULL) {
-        printf("Error: Unable to allocate memory for matrix.\n");
-        fclose(file);
-        return NULL;
-    }
+    simple_matrix mat = allocate_matrix(2, (size_t[]){rows, cols}, ZEROS, 0.0, 0.0);
 
     size_t row = 0;
     while (fgets(line, sizeof(line), file)) {
         size_t col = 0;
         char *token = strtok(line, ",");
         while (token != NULL && col < cols) {
-            mat->mat[row * cols + col] = atof(token);
+            mat.mat[row * cols + col] = atof(token);
             token = strtok(NULL, ",");
             col++;
         }
@@ -277,40 +316,21 @@ void matrix_to_csv(simple_matrix *mat, const char *filename) {
 
 
 
-void print_shape(simple_matrix * mat){
-  for(size_t i;i<mat->ndims;i++){
 
-  printf("%d X ",mat->dims[i]);
-  
+simple_matrix slice_rows(simple_matrix *matrix, int start, int end) {
 
-  }
-  printf("\n");
-}
-
-simple_matrix *slice_rows(simple_matrix *matrix, int start, int end) {
-    if (matrix == NULL || matrix->mat == NULL) {
-        printf("Error: Invalid matrix.\n");
-        return NULL;
-    }
-
+    // Adjust negative indices
     if (start < 0) start = (int)MATRIX_ROWS(matrix) + start;
     if (end < 0) end = (int)MATRIX_ROWS(matrix) + end;
 
+    // Clamp indices to valid ranges
     if (start < 0) start = 0;
     if (end > (int)MATRIX_ROWS(matrix)) end = (int)MATRIX_ROWS(matrix);
-    if (start >= end) {
-        printf("Error: Invalid slice range.\n");
-        return NULL;
-    }
 
     size_t slice_rows = (size_t)(end - start);
     size_t cols = MATRIX_COLS(matrix);
-    simple_matrix *result = allocate_matrix(slice_rows, (size_t []){MATRIX_COLS(matrix),slice_rows}, ZEROS, 0.0, 0.0);
-    if (!result) {
-        printf("Error: Unable to allocate memory for the sliced matrix.\n");
-        return NULL;
-    }
-    memcpy(result->mat, &matrix->mat[start * cols], slice_rows * cols * sizeof(double));
+    simple_matrix result = allocate_matrix(slice_rows, (size_t []){MATRIX_COLS(matrix),slice_rows}, ZEROS, 0.0, 0.0);
+    memcpy(result.mat, &matrix->mat[start * cols], slice_rows * cols * sizeof(double));
 
     return result;
 }
@@ -337,7 +357,6 @@ void add_columns(simple_matrix *matrix, simple_matrix *new_columns) {
         return;
     }
 
-    // Copy old matrix data into new matrix
     for (size_t i = 0; i < MATRIX_ROWS(matrix); i++) {
         for (size_t j = 0; j < MATRIX_COLS(matrix); j++) {
             new_data[i * new_cols + j] = matrix->mat[i * MATRIX_COLS(matrix) + j];
@@ -352,7 +371,7 @@ void add_columns(simple_matrix *matrix, simple_matrix *new_columns) {
 
     free(matrix->mat);
     matrix->mat = new_data;
-    matrix->dims[1] = new_cols;  
+    matrix->dims[1] = new_cols;  // Update the number of columns in the dimensions
 }
 
 void replace_column(simple_matrix *matrix, size_t col_index, simple_matrix *new_column) {
@@ -380,22 +399,26 @@ void replace_column(simple_matrix *matrix, size_t col_index, simple_matrix *new_
         matrix->mat[i * MATRIX_COLS(matrix) + col_index] = new_column->mat[i * MATRIX_COLS(new_column)];
     }
 }
+simple_matrix copy_matrix(const simple_matrix *source) {
 
-simple_matrix *extract_column(simple_matrix *matrix, size_t col_index) {
-    if (matrix == NULL || matrix->mat == NULL || col_index >= MATRIX_COLS(matrix)) {
-        printf("Error: Invalid column index or matrix.\n");
-        return NULL;
+    simple_matrix copy = allocate_matrix(source->ndims, source->dims, ZEROS, 0.0, 0.0);
+
+    size_t total_elements = 1;
+    for (size_t i = 0; i < source->ndims; i++) {
+        total_elements *= source->dims[i];
     }
 
+    memcpy(copy.mat, source->mat, total_elements * sizeof(double));
+
+    return copy;
+}
+
+
+simple_matrix extract_column(simple_matrix *matrix, size_t col_index) {
     size_t dims[2] = {MATRIX_ROWS(matrix), 1};
-    simple_matrix *column = allocate_matrix(2, dims, ZEROS, 0.0, 0.0);
-    if (!column) {
-        printf("Error: Unable to allocate memory for the column.\n");
-        return NULL;
-    }
-
+    simple_matrix column = allocate_matrix(2, dims, ZEROS, 0.0, 0.0);
     for (size_t i = 0; i < MATRIX_ROWS(matrix); i++) {
-        column->mat[i] = matrix->mat[i * MATRIX_COLS(matrix) + col_index];
+        column.mat[i] = matrix->mat[i * MATRIX_COLS(matrix) + col_index];
     }
 
     return column;
@@ -495,34 +518,18 @@ void scale_columns(simple_matrix *matrix, double scalar) {
         matrix->mat[i] *= scalar;
     }
 }
-simple_matrix *extract_columns(simple_matrix *matrix, size_t *columns, size_t num_columns) {
-    if (matrix == NULL || matrix->mat == NULL || columns == NULL || num_columns == 0) {
-        printf("Error: Invalid input to extract_columns.\n");
-        return NULL;
-    }
+simple_matrix extract_columns(simple_matrix *matrix, size_t *columns, size_t num_columns) {
 
+    // Ensure valid dimensions for rows and columns
     size_t rows = MATRIX_ROWS(matrix);
     size_t cols = MATRIX_COLS(matrix);
-    if (rows == 0 || cols == 0) {
-        printf("Error: Matrix has invalid dimensions.\n");
-        return NULL;
-    }
 
-    simple_matrix *result = allocate_matrix(2, (size_t[]){rows, num_columns}, ZEROS, 0.0, 0.0);
-    if (!result) {
-        printf("Error: Unable to allocate memory for the result matrix.\n");
-        return NULL;
-    }
+    simple_matrix result = allocate_matrix(2, (size_t[]){rows, num_columns}, ZEROS, 0.0, 0.0);
 
     for (size_t i = 0; i < rows; i++) {
         for (size_t j = 0; j < num_columns; j++) {
             size_t col_index = columns[j];
-            if (col_index >= cols) {
-                printf("Error: Column index out of bounds (%zu >= %zu).\n", col_index, cols);
-                free_matrix(result);
-                return NULL;
-            }
-            result->mat[i * num_columns + j] = matrix->mat[i * cols + col_index];
+            result.mat[i * num_columns + j] = matrix->mat[i * cols + col_index];
         }
     }
 
@@ -532,7 +539,7 @@ simple_matrix *extract_columns(simple_matrix *matrix, size_t *columns, size_t nu
 void *dot_worker(void *arg) {
     thread_data *data = (thread_data *)arg;
 
-    size_t block_size = BLOCK_SIZE; 
+    size_t block_size = BLOCK_SIZE; // Block size for cache optimization
     size_t matrix_a_cols = MATRIX_COLS(data->matrix_a);
     size_t matrix_b_cols = MATRIX_COLS(data->matrix_b);
     size_t output_cols = MATRIX_COLS(data->output);
@@ -595,57 +602,35 @@ void dot_parallel(simple_matrix *matrix_a, simple_matrix *matrix_b, simple_matri
 
 
 
-simple_matrix *allocate_matrix(size_t ndims, size_t *dims, uint8_t initialization_method, double random_min, double random_max) {
-    if (ndims == 0 || dims == NULL) {
-        printf("Error: Invalid dimensions provided.\n");
-        return NULL;
+simple_matrix allocate_matrix(size_t ndims, size_t *dims, uint8_t initialization_method, double random_min, double random_max) {
+    simple_matrix matrix = {0};
+
+    size_t dims_copy[ndims];
+    for(size_t i= 0;i<ndims;i++){
+      dims_copy[i] = dims[i];
     }
 
-    simple_matrix *matrix = (simple_matrix *)malloc(sizeof(simple_matrix));
-    if (!matrix) {
-        printf("Error: Unable to allocate memory for matrix struct.\n");
-        return NULL;
-    }
-
-    matrix->ndims = ndims;
-    matrix->dims = (size_t *)malloc(ndims * sizeof(size_t));
-    if (!matrix->dims) {
-        printf("Error: Unable to allocate memory for matrix dimensions.\n");
-        free(matrix);
-        return NULL;
-    }
+    matrix.ndims = ndims;
+    matrix.dims = (size_t *)malloc(ndims * sizeof(size_t));
 
     size_t total_elements = 1;
     for (size_t i = 0; i < ndims; i++) {
-        if (dims[i] == 0) {
-            printf("Error: Dimensions must be greater than zero.\n");
-            free(matrix->dims);
-            free(matrix);
-            return NULL;
-        }
-        matrix->dims[i] = dims[i];
-        total_elements *= dims[i];
+        matrix.dims[i] = dims_copy[i];
+        total_elements *= dims_copy[i];
     }
 
-    matrix->mat = (double *)malloc(total_elements * sizeof(double));
-    if (!matrix->mat) {
-        printf("Error: Unable to allocate memory for matrix data.\n");
-        free(matrix->dims);
-        free(matrix);
-        return NULL;
-    }
-
+    matrix.mat = (double *)malloc(total_elements * sizeof(double));
     for (size_t i = 0; i < total_elements; i++) {
         switch (initialization_method) {
             case RANDOM:
-                matrix->mat[i] = random_min + ((double)rand() / RAND_MAX) * (random_max - random_min);
+                matrix.mat[i] = random_min + ((double)rand() / RAND_MAX) * (random_max - random_min);
                 break;
             case ONES:
-                matrix->mat[i] = 1.0;
+                matrix.mat[i] = 1.0;
                 break;
             case ZEROS:
             default:
-                matrix->mat[i] = 0.0;
+                matrix.mat[i] = 0.0;
                 break;
         }
     }
@@ -678,7 +663,6 @@ void add_cpu(simple_matrix *matrix_a, simple_matrix *matrix_b, simple_matrix *ou
     }
 }
 void substruct_cpu(simple_matrix *matrix_a, simple_matrix *matrix_b, simple_matrix *output) {
-    // Check input validity
     if (matrix_a == NULL || matrix_b == NULL || output == NULL || 
         matrix_a->mat == NULL || matrix_b->mat == NULL || output->mat == NULL) {
         printf("Error: Invalid input matrices.\n");
@@ -788,6 +772,7 @@ void free_matrix(simple_matrix * matrix){
   free(matrix);
 }
 
+
 void print_matrix(simple_matrix *matrix) {
     if (matrix == NULL || matrix->mat == NULL) {
         printf("Error: Invalid matrix.\n");
@@ -802,19 +787,13 @@ void print_matrix(simple_matrix *matrix) {
     }
 }
 
-simple_matrix *filter_rows(simple_matrix *matrix, int (*condition)(double *row, size_t cols)) {
-    if (matrix == NULL || matrix->mat == NULL || condition == NULL) {
-        printf("Error: Invalid input to filter_rows.\n");
-        return NULL;
-    }
+simple_matrix filter_rows(simple_matrix *matrix, int (*condition)(double *row, size_t cols)) {
 
+    // Temporary storage to track rows that satisfy the condition
     size_t *valid_rows = (size_t *)malloc(MATRIX_ROWS(matrix) * sizeof(size_t));
-    if (!valid_rows) {
-        printf("Error: Unable to allocate memory for valid rows.\n");
-        return NULL;
-    }
     size_t valid_count = 0;
 
+    // Check each row against the condition
     for (size_t i = 0; i < MATRIX_ROWS(matrix); i++) {
         double *row = &matrix->mat[i * MATRIX_COLS(matrix)];
         if (condition(row, MATRIX_COLS(matrix))) {
@@ -823,20 +802,16 @@ simple_matrix *filter_rows(simple_matrix *matrix, int (*condition)(double *row, 
     }
 
     size_t dims[] = {valid_count, MATRIX_COLS(matrix)};
-    simple_matrix *filtered = allocate_matrix(2, dims, ZEROS, 0.0, 0.0);
-    if (!filtered) {
-        printf("Error: Unable to allocate memory for filtered matrix.\n");
-        free(valid_rows);
-        return NULL;
-    }
+    simple_matrix filtered = allocate_matrix(2, dims, ZEROS, 0.0, 0.0);
 
     for (size_t i = 0; i < valid_count; i++) {
         size_t row_index = valid_rows[i];
         for (size_t j = 0; j < MATRIX_COLS(matrix); j++) {
-            filtered->mat[i * MATRIX_COLS(matrix) + j] = matrix->mat[row_index * MATRIX_COLS(matrix) + j];
+            filtered.mat[i * MATRIX_COLS(matrix) + j] = matrix->mat[row_index * MATRIX_COLS(matrix) + j];
         }
     }
 
+    // Free temporary storage
     free(valid_rows);
 
     return filtered;
@@ -844,6 +819,19 @@ simple_matrix *filter_rows(simple_matrix *matrix, int (*condition)(double *row, 
 
 
 
+void print_shape(simple_matrix * mat){
+
+      for(size_t j=0;j<mat->ndims;j++){
+	if(j!=mat->ndims-1){
+
+	  printf("%ld X ",mat->dims[j]);
+	}else{
+	  printf("%ld\n",mat->dims[j]);
+	}
+      
+}
+
+}
 
 
 #endif
